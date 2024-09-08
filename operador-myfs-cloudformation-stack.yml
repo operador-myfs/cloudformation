@@ -1,0 +1,343 @@
+Parameters:
+  AMIId:
+    Description: Amazon Linux 2 Amazon Linux 2 AMI (HVM) - Kernel 5.10, SSD Volume
+      Type free tier
+    Type: String
+    Default: ami-02c21308fed24a8ab
+  EC2KeyPair:
+    Description: Key pair para instancias de ec2
+    Type: String
+    Default: operador-keypair
+
+Resources:
+  # Crear una VPC
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: operador-vpc
+
+  # Crear una Subnet publica
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select
+        - 0
+        - !GetAZs ''
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: operador-subnet
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select
+        - 1
+        - !GetAZs ''
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: operador-subnet-2
+
+  # Crear una Gateway de Internet
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: operador-internet-gateway
+
+  # Adjuntar la Gateway de Internet a la VPC
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # Crear una tabla de rutas para la Subnet publica
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: operador-public-route-table
+
+  # Crear una ruta de salida a Internet en la tabla de rutas publicas
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  # Asociar la Subnet publica con la tabla de rutas
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  # Crear un Security Group para la instancia EC2
+  ECSInstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Permitir SSH y HTTP
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: operador-security-group
+
+  EC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+        - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+      Policies:
+        - PolicyName: ECSInstancePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecs:*
+                  - ecr-public:GetAuthorizationToken
+                  - ecr-public:BatchGetImage
+                  - ecr-public:GetDownloadUrlForLayer
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:CreateLogGroup
+                  - autoscaling:DescribeAutoScalingGroups
+                  - autoscaling:DescribeAutoScalingInstances
+                  - autoscaling:DescribeLaunchConfigurations
+                  - autoscaling:DescribeTags
+                  - ec2:DescribeInstances
+                  - ec2:DescribeTags
+                  - ec2:DescribeSecurityGroups
+                  - ec2:DescribeSubnets
+                  - ec2:DescribeVpcs
+                Resource: '*'
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref EC2Role
+
+  # Crear el cluster de ECS
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: operador-ecs-cluster
+
+  # Crear el Auto Scaling Group
+  ECSAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      LaunchConfigurationName: !Ref ECSLaunchConfiguration
+      MinSize: '1'
+      MaxSize: '2'
+      DesiredCapacity: '1'
+      VPCZoneIdentifier:
+        - !Ref PublicSubnet
+      Tags:
+        - Key: Name
+          Value: operador-auto-scaling-instance
+          PropagateAtLaunch: true
+
+  # Crear un Launch Configuration
+  ECSLaunchConfiguration:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      ImageId: !Ref AMIId
+      InstanceType: t2.medium
+      KeyName: !Ref EC2KeyPair
+      SecurityGroups:
+        - !Ref ECSInstanceSecurityGroup
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      UserData: !Base64
+        Fn::Sub: |
+          #!/bin/bash
+          # Instalar el agente de ECS y registrar la instancia al cl?ster
+          amazon-linux-extras install ecs -y
+          echo ECS_CLUSTER=${ECSCluster} >> /etc/ecs/ecs.config
+          # Habilitar y iniciar el servicio de ECS
+          systemctl enable --now --no-block ecs.service
+          /opt/aws/bin/cfn-signal -e 0 --stack ${AWS::StackName} --resource ECSAutoScalingGroup --region ${AWS::Region}
+
+  ECSTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: operador-ecs-task
+      RequiresCompatibilities:
+        - EC2
+      NetworkMode: bridge
+      Cpu: 512
+      Memory: 1024
+      ContainerDefinitions:
+        - Name: backend-services-frases-buenas
+          Image: ccampos29/backend-services-frases-buenas:latest
+          PortMappings:
+            - ContainerPort: 8080
+              HostPort: 0
+          Essential: true
+          Memory: 800
+          Cpu: 256
+          Privileged: true
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - curl -f http://localhost:8080/actuator/health || exit 1
+            Interval: 60
+            Timeout: 10
+            Retries: 3
+            StartPeriod: 120
+
+  ECSService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - ECSLoadBalancer
+      - ECSTargetGroup
+      - ECSLoadBalancerListener
+    Properties:
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref ECSTaskDefinition
+      LoadBalancers:
+        - ContainerName: "backend-services-frases-buenas"
+          ContainerPort: 8080
+          TargetGroupArn: !Ref ECSTargetGroup
+      DesiredCount: 1
+      LaunchType: EC2
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 0
+        MaximumPercent: 100
+
+  # Crear un Load Balancer
+  ECSLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: operador-load-balancer
+      Subnets:
+        - !Ref PublicSubnet
+        - !Ref PublicSubnet2
+      SecurityGroups:
+        - !Ref ECSInstanceSecurityGroup
+      Scheme: internet-facing
+      Type: application
+      Tags:
+        - Key: Name
+          Value: operador-load-balancer
+
+  # Definir un Target Group para el Load Balancer
+  ECSTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref VPC
+      Port: 80
+      Protocol: HTTP
+      TargetType: instance
+      HealthCheckEnabled: true
+      HealthCheckPath: /actuator/health
+
+  # Asociar el Load Balancer con el Target Group
+  ECSLoadBalancerListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ECSTargetGroup
+      LoadBalancerArn: !Ref ECSLoadBalancer
+      Port: 80
+      Protocol: HTTP
+
+  # Agregar API Gateway Rest API
+  APIGateway:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: operador-api-gateway
+      Description: API Gateway para acceder al servicio de backend en EC2
+      FailOnWarnings: true
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+
+  # Crear recurso de proxy en API Gateway para enrutar todas las solicitudes
+  APIGatewayResourceProxy:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      ParentId: !GetAtt APIGateway.RootResourceId
+      PathPart: '{proxy+}'
+      RestApiId: !Ref APIGateway
+
+  # Definir método ANY para manejar todas las solicitudes al recurso proxy
+  APIGatewayMethodAny:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: ANY
+      RequestParameters:
+        method.request.path.proxy: true
+      ResourceId: !Ref APIGatewayResourceProxy
+      RestApiId: !Ref APIGateway
+      Integration:
+        IntegrationHttpMethod: ANY
+        Type: HTTP_PROXY
+        Uri: !Sub
+          - http://${LoadBalancerDNSName}/{proxy}
+          - LoadBalancerDNSName: !GetAtt ECSLoadBalancer.DNSName
+        PassthroughBehavior: WHEN_NO_MATCH
+        RequestParameters:
+          integration.request.path.proxy: method.request.path.proxy
+        IntegrationResponses:
+          - StatusCode: '200'
+
+  # Crear una autorización de permisos de API Gateway para la instancia EC2
+  APIGatewayDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: APIGatewayMethodAny
+    Properties:
+      RestApiId: !Ref APIGateway
+      StageName: prod
+
+  # Definir permisos en el grupo de seguridad de EC2 para permitir acceso desde API Gateway
+  ECSInstanceSecurityGroupIngressFromAPIGateway:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref ECSInstanceSecurityGroup
+      IpProtocol: tcp
+      FromPort: 32768
+      ToPort: 65535
+      CidrIp: 0.0.0.0/0 # Ajusta esto para más seguridad si tienes una IP específica
+
+Outputs:
+  ApiGatewayInvokeURL:
+    Description: La URL de invocación del API Gateway
+    Value: !Sub https://${APIGateway}.execute-api.${AWS::Region}.amazonaws.com/prod
