@@ -109,6 +109,27 @@ Resources:
         - Key: Name
           Value: operador-security-group
 
+  ECSRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: SecretsManagerAccessPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - arn:aws:secretsmanager:us-east-1:579389369129:secret:operador/prod/documents-RIlNi7
+
   EC2Role:
     Type: AWS::IAM::Role
     Properties:
@@ -188,17 +209,17 @@ Resources:
       UserData: !Base64
         Fn::Sub: |
           #!/bin/bash
-          # Instalar el agente de ECS y registrar la instancia al cl?ster
+          # Instalar el agente de ECS y registrar la instancia al cluster
           amazon-linux-extras install ecs -y
           echo ECS_CLUSTER=${ECSCluster} >> /etc/ecs/ecs.config
           # Habilitar y iniciar el servicio de ECS
           systemctl enable --now --no-block ecs.service
           /opt/aws/bin/cfn-signal -e 0 --stack ${AWS::StackName} --resource ECSAutoScalingGroup --region ${AWS::Region}
 
-  ECSTaskDefinition:
+  BackendServicesFrasesBuenasTaskDefinition:
     Type: AWS::ECS::TaskDefinition
     Properties:
-      Family: operador-ecs-task
+      Family: td-backend-services-frases-buenas
       RequiresCompatibilities:
         - EC2
       NetworkMode: bridge
@@ -223,7 +244,51 @@ Resources:
             Retries: 3
             StartPeriod: 120
 
-  ECSService:
+  BackendServicesDocumentsTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: td-backend-services-documents
+      RequiresCompatibilities:
+        - EC2
+      NetworkMode: bridge
+      Cpu: 512
+      Memory: 1024
+      ExecutionRoleArn: !GetAtt ECSRole.Arn
+      ContainerDefinitions:
+        - Name: backend-services-documents
+          Image: ccampos29/backend-services-documents:latest
+          PortMappings:
+            - ContainerPort: 8080
+              HostPort: 0
+          Essential: true
+          Cpu: 256
+          Memory: 512
+          Privileged: true
+          Secrets:
+            - Name: AWS_BUCKET
+              ValueFrom: myfs-aws-bucket
+            - Name: AWS_REGION
+              ValueFrom: us-east-1
+            - Name: AWS_ACCESS_KEY
+              ValueFrom: arn:aws:secretsmanager:us-east-1:579389369129:secret:operador/prod/documents-RIlNi7:AWS_ACCESS_KEY
+            - Name: AWS_SECRET_ACCESS_KEY
+              ValueFrom: arn:aws:secretsmanager:us-east-1:579389369129:secret:operador/prod/documents-RIlNi7:AWS_SECRET_ACCESS_KEY
+            - Name: FIREBASE_PROJECT_ID
+              ValueFrom: arn:aws:secretsmanager:us-east-1:579389369129:secret:operador/prod/documents-RIlNi7:FIREBASE_PROJECT_ID
+            - Name: FIREBASE_CLIENT_EMAIL
+              ValueFrom: arn:aws:secretsmanager:us-east-1:579389369129:secret:operador/prod/documents-RIlNi7:FIREBASE_CLIENT_EMAIL
+            - Name: FIREBASE_PRIVATE_KEY
+              ValueFrom: arn:aws:secretsmanager:us-east-1:579389369129:secret:operador/prod/documents-RIlNi7:FIREBASE_PRIVATE_KEY
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - curl -f http://localhost:8080/actuator/health || exit 1
+            Interval: 60
+            Timeout: 10
+            Retries: 3
+            StartPeriod: 120
+
+  BackendServicesFrasesBuenasECSService:
     Type: AWS::ECS::Service
     DependsOn:
       - ECSLoadBalancer
@@ -231,9 +296,28 @@ Resources:
       - ECSLoadBalancerListener
     Properties:
       Cluster: !Ref ECSCluster
-      TaskDefinition: !Ref ECSTaskDefinition
+      TaskDefinition: !Ref BackendServicesFrasesBuenasTaskDefinition
       LoadBalancers:
         - ContainerName: "backend-services-frases-buenas"
+          ContainerPort: 8080
+          TargetGroupArn: !Ref ECSTargetGroup
+      DesiredCount: 1
+      LaunchType: EC2
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 0
+        MaximumPercent: 100
+
+  BackendServicesDocumentsECSService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - ECSLoadBalancer
+      - ECSTargetGroup
+      - ECSLoadBalancerListener
+    Properties:
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref BackendServicesDocumentsTaskDefinition
+      LoadBalancers:
+        - ContainerName: "backend-services-documents"
           ContainerPort: 8080
           TargetGroupArn: !Ref ECSTargetGroup
       DesiredCount: 1
