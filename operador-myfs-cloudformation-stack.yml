@@ -1,3 +1,5 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
 Parameters:
   AMIId:
     Description: Amazon Linux 2 Amazon Linux 2 AMI (HVM) - Kernel 5.10, SSD Volume
@@ -29,7 +31,7 @@ Resources:
       CidrBlock: 10.0.1.0/24
       AvailabilityZone: !Select
         - 0
-        - !GetAZs ''
+        - !GetAZs ""
       MapPublicIpOnLaunch: true
       Tags:
         - Key: Name
@@ -42,7 +44,7 @@ Resources:
       CidrBlock: 10.0.2.0/24
       AvailabilityZone: !Select
         - 1
-        - !GetAZs ''
+        - !GetAZs ""
       MapPublicIpOnLaunch: true
       Tags:
         - Key: Name
@@ -111,7 +113,7 @@ Resources:
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
-        Version: '2012-10-17'
+        Version: "2012-10-17"
         Statement:
           - Effect: Allow
             Principal:
@@ -124,7 +126,7 @@ Resources:
       Policies:
         - PolicyName: ECSInstancePolicy
           PolicyDocument:
-            Version: '2012-10-17'
+            Version: "2012-10-17"
             Statement:
               - Effect: Allow
                 Action:
@@ -144,7 +146,7 @@ Resources:
                   - ec2:DescribeSecurityGroups
                   - ec2:DescribeSubnets
                   - ec2:DescribeVpcs
-                Resource: '*'
+                Resource: "*"
 
   EC2InstanceProfile:
     Type: AWS::IAM::InstanceProfile
@@ -163,9 +165,9 @@ Resources:
     Type: AWS::AutoScaling::AutoScalingGroup
     Properties:
       LaunchConfigurationName: !Ref ECSLaunchConfiguration
-      MinSize: '1'
-      MaxSize: '2'
-      DesiredCapacity: '1'
+      MinSize: "1"
+      MaxSize: "2"
+      DesiredCapacity: "1"
       VPCZoneIdentifier:
         - !Ref PublicSubnet
       Tags:
@@ -294,7 +296,7 @@ Resources:
     Type: AWS::ApiGateway::Resource
     Properties:
       ParentId: !GetAtt APIGateway.RootResourceId
-      PathPart: '{proxy+}'
+      PathPart: "{proxy+}"
       RestApiId: !Ref APIGateway
 
   # Definir método ANY para manejar todas las solicitudes al recurso proxy
@@ -317,7 +319,7 @@ Resources:
         RequestParameters:
           integration.request.path.proxy: method.request.path.proxy
         IntegrationResponses:
-          - StatusCode: '200'
+          - StatusCode: "200"
 
   # Crear una autorización de permisos de API Gateway para la instancia EC2
   APIGatewayDeployment:
